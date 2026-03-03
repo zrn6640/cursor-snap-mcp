@@ -13,6 +13,31 @@ from pydantic import Field
 
 mcp = FastMCP("Interactive Feedback MCP", log_level="ERROR")
 HEARTBEAT_INTERVAL = 15
+LOCK_FILE = os.path.join(tempfile.gettempdir(), "cursor_snap_mcp.lock")
+
+
+def _acquire_lock() -> bool:
+    try:
+        if os.path.exists(LOCK_FILE):
+            try:
+                with open(LOCK_FILE, "r") as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 0)
+                return False
+            except (ValueError, ProcessLookupError, PermissionError):
+                os.unlink(LOCK_FILE)
+        with open(LOCK_FILE, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except OSError:
+        return False
+
+
+def _release_lock():
+    try:
+        os.unlink(LOCK_FILE)
+    except OSError:
+        pass
 
 
 async def launch_feedback_ui(
@@ -21,6 +46,9 @@ async def launch_feedback_ui(
     predefined_options: list[str] | None = None,
     ctx: Context | None = None,
 ) -> dict:
+    if not _acquire_lock():
+        return {"interactive_feedback": "", "logs": "", "images": []}
+
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         output_file = tmp.name
 
@@ -85,6 +113,8 @@ async def launch_feedback_ui(
         if os.path.exists(output_file):
             os.unlink(output_file)
         raise
+    finally:
+        _release_lock()
 
 
 def _first_line(text: str) -> str:

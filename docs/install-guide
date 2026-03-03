@@ -1,0 +1,90 @@
+# Cursor Snap MCP — Installation Guide for LLM Agents
+
+You are an LLM agent helping a user install Cursor Snap MCP.
+Follow these steps exactly. Do NOT skip any step.
+
+## Prerequisites
+
+- Python >= 3.11
+- uv (Python package manager): `pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Cursor IDE with Hooks support
+
+## Step 1: Clone the repository
+
+```bash
+git clone https://github.com/zrn6640/cursor-snap-mcp.git ~/cursor-snap-mcp
+cd ~/cursor-snap-mcp
+uv sync
+```
+
+## Step 2: Run the install script
+
+The install script copies hooks, creates config, and starts the tray app.
+
+**macOS / Linux:**
+```bash
+chmod +x install.sh
+./install.sh <PROJECT_DIR>
+```
+
+**Windows (PowerShell):**
+```powershell
+.\install.ps1 -ProjectDir <PROJECT_DIR>
+```
+
+Replace `<PROJECT_DIR>` with the user's Cursor project directory (the one containing `.cursor/`).
+
+## Step 3: Verify installation
+
+After running install.sh, verify these files exist in the project:
+- `<PROJECT_DIR>/.cursor/hooks.json`
+- `<PROJECT_DIR>/.cursor/hooks/interrupt-check.sh` (or .ps1 on Windows)
+- `<PROJECT_DIR>/.cursor/hooks/clear-interrupt.sh`
+- `<PROJECT_DIR>/.cursor/hooks/interrupt-check-subagent.sh`
+- `<PROJECT_DIR>/.cursor/rules/interrupt-hook.mdc`
+
+## Step 4: Configure MCP in Cursor
+
+If install.sh didn't create it, add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "interactive-feedback": {
+      "command": "uv",
+      "args": ["--directory", "<CLONE_DIR>", "run", "server.py"],
+      "timeout": 10800,
+      "autoApprove": ["interactive_feedback"]
+    }
+  }
+}
+```
+
+Replace `<CLONE_DIR>` with the actual path where the repo was cloned (e.g., `~/cursor-snap-mcp`).
+
+## Step 5: Add Cursor User Rule
+
+Add to Cursor Settings → Rules → User Rules:
+
+```
+Whenever you're about to complete a user request, call the MCP interactive_feedback instead of simply ending the process. Keep calling MCP until the user's feedback is empty, then end the request.
+```
+
+## Step 6: Restart Cursor
+
+Hooks require a Cursor restart to take effect. Tell the user to restart Cursor.
+
+## Step 7: Verify tray icon
+
+After restart, a gray circle (●) should appear in the system tray / menu bar. If not, run:
+
+```bash
+cd ~/cursor-snap-mcp && ./start-tray.sh
+```
+
+## Done!
+
+Tell the user:
+- Click the gray ● in menu bar to interrupt the agent
+- The icon turns red 🔴 when waiting for agent response
+- MCP popup supports text + screenshots (Ctrl+V to paste)

@@ -12,7 +12,9 @@ from fastmcp.utilities.types import Image
 from pydantic import Field
 
 mcp = FastMCP("Interactive Feedback MCP", log_level="ERROR")
-HEARTBEAT_INTERVAL = 15
+HEARTBEAT_INTERVAL = 30
+MAX_HEARTBEAT_FAILURES = 3
+_active_windows: set[int] = set()
 LOCK_FILE = os.path.join(tempfile.gettempdir(), "cursor_snap_mcp.lock")
 
 
@@ -45,6 +47,7 @@ async def launch_feedback_ui(
     summary: str,
     predefined_options: list[str] | None = None,
     ctx: Context | None = None,
+    window_id: int = 1,
 ) -> dict:
     if not _acquire_lock():
         return {"interactive_feedback": "", "logs": "", "images": []}
@@ -57,10 +60,17 @@ async def launch_feedback_ui(
         feedback_ui_path = os.path.join(script_dir, "feedback_ui.py")
 
         args = [
-            sys.executable, "-u", feedback_ui_path,
-            "--project-directory", project_directory,
-            "--prompt", summary,
-            "--output-file", output_file,
+            sys.executable,
+            "-u",
+            feedback_ui_path,
+            "--project-directory",
+            project_directory,
+            "--prompt",
+            summary,
+            "--output-file",
+            output_file,
+            "--window-id",
+            str(window_id),
         ]
         if predefined_options:
             args.extend(["--predefined-options", "|||".join(predefined_options)])
@@ -75,6 +85,7 @@ async def launch_feedback_ui(
         try:
             wait_task = asyncio.ensure_future(process.wait())
             elapsed = 0
+            heartbeat_failures = 0
             while not wait_task.done():
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 if not wait_task.done() and ctx:
@@ -85,8 +96,17 @@ async def launch_feedback_ui(
                             total=elapsed + 600,
                         )
                         await ctx.info(f"Waiting for user feedback... ({elapsed}s)")
+                        heartbeat_failures = 0
                     except Exception:
-                        pass
+                        heartbeat_failures += 1
+                        if heartbeat_failures >= MAX_HEARTBEAT_FAILURES:
+                            if process.returncode is None:
+                                process.terminate()
+                                try:
+                                    await asyncio.wait_for(process.wait(), timeout=5)
+                                except asyncio.TimeoutError:
+                                    process.kill()
+                            break
             await wait_task
         except (asyncio.CancelledError, Exception):
             if process.returncode is None:
@@ -135,12 +155,38 @@ async def interactive_feedback(
     predefined_options_list = (
         predefined_options if isinstance(predefined_options, list) else None
     )
-    result = await launch_feedback_ui(
-        _first_line(project_directory),
-        summary,
-        predefined_options_list,
-        ctx,
-    )
+
+    # 分配唯一的window_id
+    window_id = 1
+    while window_id in _active_windows:
+        window_id += 1
+    _active_windows.add(window_id)
+
+    max_attempts = 2
+    last_error = None
+    try:
+        for attempt in range(max_attempts):
+            try:
+                result = await launch_feedback_ui(
+                    _first_line(project_directory),
+                    summary,
+                    predefined_options_list,
+                    ctx,
+                    window_id=window_id,
+                )
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts - 1:
+                    continue
+                return {
+                    "interactive_feedback": (
+                        f"[Feedback UI failed after {max_attempts} attempts: {last_error}. "
+                        "Please use AskQuestion tool as fallback.]"
+                    )
+                }
+    finally:
+        _active_windows.discard(window_id)
 
     text = result.get("interactive_feedback", "")
     logs = result.get("logs", "")

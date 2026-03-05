@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Cursor Agent Interrupt Trigger - System Tray App (cross-platform)
-Click the tray icon to send an interrupt signal.
-The icon turns red while waiting for the agent to respond.
-"""
+"""Cursor Agent Interrupt Trigger - System Tray App (cross-platform)."""
 import os
 import sys
 import tempfile
@@ -12,7 +8,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-# Use /tmp on Unix to match hook scripts; %TEMP% on Windows.
 TEMP_DIR = os.environ.get("TEMP", tempfile.gettempdir()) if sys.platform == "win32" else "/tmp"
 SIGNAL_FILE = os.path.join(TEMP_DIR, "cursor_interrupt")
 POLL_INTERVAL_MS = 500
@@ -66,8 +61,6 @@ class InterruptTray:
         menu.addAction(quit_action)
 
         self.tray.setContextMenu(menu)
-
-        # macOS: also handle direct click (may not work on all versions)
         self.tray.activated.connect(self._on_activated)
 
         self.poll_timer = QTimer()
@@ -79,6 +72,8 @@ class InterruptTray:
 
     def _on_activated(self, reason):
         log(f"Activated: reason={reason}")
+        if sys.platform == "darwin":
+            return
         if reason in (
             QSystemTrayIcon.Trigger,
             QSystemTrayIcon.DoubleClick,

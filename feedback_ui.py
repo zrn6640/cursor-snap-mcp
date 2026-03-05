@@ -12,6 +12,7 @@ import psutil
 from PySide6.QtCore import (
     QBuffer,
     QByteArray,
+    QEvent,
     QIODevice,
     QObject,
     QSettings,
@@ -208,9 +209,6 @@ class ScreenshotThumbnail(QWidget):
 class FeedbackTextEdit(QTextEdit):
     image_pasted = Signal(QImage)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key_Return and event.modifiers() == Qt.ControlModifier:
             parent = self.parent()
@@ -240,11 +238,15 @@ class FeedbackUI(QMainWindow):
         project_directory: str,
         prompt: str,
         predefined_options: list[str] | None = None,
+        window_id: str = "1",
     ):
         super().__init__()
         self.project_directory = project_directory
         self.prompt = prompt
         self.predefined_options = predefined_options or []
+        self.window_id = window_id
+        
+        self.timeout_ms = 30 * 60 * 1000
 
         self.process: subprocess.Popen | None = None
         self.log_buffer = []
@@ -253,7 +255,10 @@ class FeedbackUI(QMainWindow):
         self.log_signals = LogSignals()
         self.log_signals.append_log.connect(self._append_log)
 
-        self.setWindowTitle("Interactive Feedback MCP")
+        title = "Interactive Feedback MCP"
+        if window_id and window_id != "1":
+            title += f" #{window_id}"
+        self.setWindowTitle(title)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(script_dir, "images", "feedback.png")
         if os.path.exists(icon_path):
@@ -294,6 +299,11 @@ class FeedbackUI(QMainWindow):
         }
 
         self._create_ui()
+        self.installEventFilter(self)
+        self.timeout_timer = QTimer()
+        self.timeout_timer.setSingleShot(True)
+        self.timeout_timer.timeout.connect(self._on_timeout)
+        self.timeout_timer.start(self.timeout_ms)
 
         self.command_group.setVisible(command_section_visible)
         self.toggle_command_button.setText(
@@ -317,12 +327,10 @@ class FeedbackUI(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
-        # --- Command section toggle ---
         self.toggle_command_button = QPushButton("Show Command Section")
         self.toggle_command_button.clicked.connect(self._toggle_command_section)
         layout.addWidget(self.toggle_command_button)
 
-        # --- Command section ---
         self.command_group = QGroupBox("Command")
         command_layout = QVBoxLayout(self.command_group)
 
@@ -372,11 +380,9 @@ class FeedbackUI(QMainWindow):
         self.command_group.setVisible(False)
         layout.addWidget(self.command_group)
 
-        # --- Feedback section ---
         self.feedback_group = QGroupBox("Feedback")
         feedback_layout = QVBoxLayout(self.feedback_group)
 
-        # Prompt display with copy button
         prompt_header = QHBoxLayout()
         prompt_title = QLabel("Message:")
         prompt_title.setStyleSheet("font-weight: bold; color: #ccc; font-size: 12px;")
@@ -410,7 +416,6 @@ class FeedbackUI(QMainWindow):
         self.description_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         feedback_layout.addWidget(self.description_text)
 
-        # Predefined options
         self.option_checkboxes = []
         if self.predefined_options:
             options_frame = QFrame()
@@ -427,23 +432,16 @@ class FeedbackUI(QMainWindow):
             separator.setFrameShadow(QFrame.Sunken)
             feedback_layout.addWidget(separator)
 
-        # Feedback text input
         self.feedback_text = FeedbackTextEdit()
         self.feedback_text.image_pasted.connect(self._on_image_pasted)
-        font_metrics = self.feedback_text.fontMetrics()
-        row_height = font_metrics.height()
-        padding = (
-            self.feedback_text.contentsMargins().top()
-            + self.feedback_text.contentsMargins().bottom()
-            + 5
-        )
-        self.feedback_text.setMinimumHeight(5 * row_height + padding)
+        m = self.feedback_text.contentsMargins()
+        padding = m.top() + m.bottom() + 5
+        self.feedback_text.setMinimumHeight(5 * self.feedback_text.fontMetrics().height() + padding)
         self.feedback_text.setPlaceholderText(
             "Enter your feedback here (Ctrl+Enter to submit, Ctrl+V to paste screenshot)"
         )
         feedback_layout.addWidget(self.feedback_text)
 
-        # --- Screenshot section ---
         screenshot_section = QFrame()
         screenshot_main_layout = QVBoxLayout(screenshot_section)
         screenshot_main_layout.setContentsMargins(0, 5, 0, 5)
@@ -487,14 +485,11 @@ class FeedbackUI(QMainWindow):
 
         feedback_layout.addWidget(screenshot_section)
 
-        # Submit button
         submit_button = QPushButton("&Send Feedback (Ctrl+Enter)")
         submit_button.clicked.connect(self._submit_feedback)
         feedback_layout.addWidget(submit_button)
 
         layout.addWidget(self.feedback_group)
-
-    # --- Command section methods ---
 
     def _toggle_command_section(self):
         is_visible = self.command_group.isVisible()
@@ -575,8 +570,6 @@ class FeedbackUI(QMainWindow):
         self.settings.endGroup()
         self._append_log("Configuration saved for this project.\n")
 
-    # --- Screenshot methods ---
-
     def _capture_screen(self):
         self.showMinimized()
         QTimer.singleShot(600, self._do_capture_screen)
@@ -653,8 +646,6 @@ class FeedbackUI(QMainWindow):
         buffer.close()
         return byte_array.toBase64().data().decode("ascii")
 
-    # --- Submit / Close ---
-
     def _submit_feedback(self):
         feedback_text = self.feedback_text.toPlainText().strip()
         selected_options = []
@@ -682,6 +673,25 @@ class FeedbackUI(QMainWindow):
     def clear_logs(self):
         self.log_buffer = []
         self.log_text.clear()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (
+            QEvent.KeyPress,
+            QEvent.MouseButtonPress,
+            QEvent.MouseMove,
+            QEvent.Wheel,
+        ):
+            self.timeout_timer.stop()
+            self.timeout_timer.start(self.timeout_ms)
+        return super().eventFilter(obj, event)
+
+    def _on_timeout(self):
+        self.feedback_result = FeedbackResult(
+            logs="".join(self.log_buffer),
+            interactive_feedback="用户超时未响应",
+            images=[],
+        )
+        self.close()
 
     def closeEvent(self, event):
         self.settings.beginGroup("MainWindow_General")
@@ -716,11 +726,12 @@ def feedback_ui(
     prompt: str,
     predefined_options: list[str] | None = None,
     output_file: str | None = None,
+    window_id: str = "1",
 ) -> FeedbackResult | None:
     app = QApplication.instance() or QApplication()
     app.setPalette(get_dark_mode_palette(app))
     app.setStyle("Fusion")
-    ui = FeedbackUI(project_directory, prompt, predefined_options)
+    ui = FeedbackUI(project_directory, prompt, predefined_options, window_id=window_id)
     result = ui.run()
 
     if output_file:
@@ -752,6 +763,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output-file", help="Path to save the feedback result as JSON"
+    )
+    parser.add_argument(
+        "--window-id", default="1", help="Window identifier for multi-agent scenarios"
     )
     args = parser.parse_args()
 

@@ -14,6 +14,19 @@ Enhanced fork of [Interactive Feedback MCP](https://github.com/noopstudios/inter
 
 ---
 
+## 💡 Why This?
+
+In Cursor, every prompt counts as a request against your quota. When the agent misunderstands and you correct it — that's another request. And another. And another.
+
+This MCP solves that in two ways:
+
+1. **Feedback Loop** — The agent pauses and asks you mid-task. You reply with text + screenshots. Same request, zero extra cost.
+2. **Emergency Interrupt** — Agent heading the wrong way? Click the tray icon, type new instructions. The agent course-corrects **within the same request turn**.
+
+> 5 iterations that would cost 5 requests → now just 1.
+
+---
+
 ## Installation
 
 ### For Humans
@@ -40,8 +53,6 @@ curl -s https://raw.githubusercontent.com/zrn6640/cursor-snap-mcp/main/docs/inst
 ```bash
 git clone https://github.com/zrn6640/cursor-snap-mcp.git && cd cursor-snap-mcp && uv sync && ./install.sh /path/to/your/project
 ```
-
-Then **restart Cursor**.
 
 ### Verify Installation
 
@@ -73,9 +84,9 @@ afterMCPExecution
 
 ## Three Core Features
 
-### 1. ⚡ One-Click Agent Interrupt (Unique)
+### 1. ⚡ One-Click Agent Interrupt
 
-Agent heading the wrong way? Don't wait for it to finish:
+Agent doing something wrong? Don't wait for it to finish:
 
 ```
 Click tray icon → Agent's next tool call blocked by Hook
@@ -99,13 +110,7 @@ Thumbnail preview, individual delete, auto-compress > 1600px.
 
 ### 3. 💬 Feedback Loop
 
-MCP tool calls don't count as separate requests:
-
-```
-Agent → Popup → Your feedback → Agent continues → Popup → ...
-```
-
-**5 iterations that would cost 5 requests → now just 1.**
+Ask questions. Get clarifications. Make decisions. Repeat — all in one request.
 
 ---
 
@@ -136,16 +141,30 @@ Agent → Popup → Your feedback → Agent continues → Popup → ...
 
 ---
 
-## What Gets Installed
+## Reliability
 
-| File | Location | Purpose |
-|------|----------|---------|
-| `interrupt-check.sh/ps1` | `.cursor/hooks/` | preToolUse — blocks tools on interrupt |
-| `interrupt-check-subagent.sh/ps1` | `.cursor/hooks/` | subagentStart — blocks new subagents |
-| `clear-interrupt.sh/ps1` | `.cursor/hooks/` | afterMCPExecution — clears signal |
-| `hooks.json` | `.cursor/` | Hook configuration |
-| `interrupt-hook.mdc` | `.cursor/rules/` | Agent behavior rule |
-| Tray icon | System tray | One-click trigger |
+| Feature | Description |
+|---------|-------------|
+| **Heartbeat Detection** | Detects Cursor disconnection (~90s). Auto-terminates orphan windows. |
+| **Automatic Retry** | First attempt failed? Retries once. Falls back to AskQuestion if both fail. |
+| **UI Timeout** | 30-minute inactivity timeout. Resets on keyboard/mouse activity. |
+| **Multi-Agent** | Parallel agents get independent windows (#1, #2, #3...). No file lock conflicts. |
+
+---
+
+## 🔧 Configuration
+
+For long-running tasks, increase MCP timeout in Cursor config:
+
+```json
+{
+  "interactive-feedback": {
+    "command": "uv",
+    "timeout": 3600,
+    "args": [...]
+  }
+}
+```
 
 ---
 
@@ -158,11 +177,24 @@ Agent auto-pops MCP at task checkpoints. Provide text + screenshots.
 ### Emergency Interrupt
 
 1. Spot the **gray circle** ● in menu bar / system tray
-2. **Click** → "⚡ Send Interrupt"
+2. Click the icon → select "⚡ Send Interrupt" from the menu
 3. Dot turns **red** 🔴
 4. Agent's next action blocked → MCP popup
 5. **New instructions + screenshots** → Submit
 6. Dot returns gray → Agent resumes
+
+---
+
+## What Gets Installed
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `interrupt-check.sh/ps1` | `.cursor/hooks/` | preToolUse — blocks tools on interrupt |
+| `interrupt-check-subagent.sh/ps1` | `.cursor/hooks/` | subagentStart — blocks new subagents |
+| `clear-interrupt.sh/ps1` | `.cursor/hooks/` | afterMCPExecution — clears signal |
+| `hooks.json` | `.cursor/` | Hook configuration |
+| `interrupt-hook.mdc` | `.cursor/rules/` | Agent behavior rule |
+| Tray icon | System tray | One-click trigger |
 
 ---
 

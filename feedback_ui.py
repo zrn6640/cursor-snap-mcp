@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -206,26 +208,309 @@ class ScreenshotThumbnail(QWidget):
         self.setFixedWidth(166)
 
 
+IGNORED_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".idea",
+    ".cursor", ".next", "dist", "build", ".mypy_cache", ".pytest_cache",
+    ".tox", ".eggs",
+}
+
+BASE_COMMANDS = [
+    ("/edit", "切换到编辑模式"),
+    ("/chat", "切换到对话模式"),
+    ("/plan", "切换到规划模式"),
+]
+
+SUBAGENT_COMMANDS = [
+    ("/agent/explore", "subagent 快速探索代码库"),
+    ("/agent/shell", "subagent 命令执行"),
+    ("/agent/browser-use", "subagent 浏览器自动化"),
+    ("/agent/code-simplifier", "subagent 代码简化"),
+]
+
+SKILL_DIRS = [
+    os.path.expanduser("~/.cursor/skills-cursor"),
+    os.path.expanduser("~/.cursor/skills"),
+    os.path.expanduser("~/.claude/skills"),
+    os.path.expanduser("~/.codex/skills"),
+]
+
+
+def _extract_skill_desc(skill_path: str) -> str:
+    try:
+        with open(skill_path, "r", encoding="utf-8") as f:
+            fm_count = 0
+            for line in f:
+                stripped = line.strip()
+                if stripped == "---":
+                    fm_count += 1
+                    continue
+                if fm_count < 2:
+                    continue
+                if stripped:
+                    src = stripped.lstrip("#").strip() if stripped.startswith("#") else stripped
+                    return src[:60]
+    except (OSError, UnicodeDecodeError):
+        pass
+    return ""
+
+
+def scan_slash_commands() -> list[tuple[str, str]]:
+    """Dynamically collect all / commands: base + skills + subagents."""
+    commands = [*BASE_COMMANDS]
+    seen_skills: set[str] = set()
+    for base_dir in SKILL_DIRS:
+        if not os.path.isdir(base_dir):
+            continue
+        try:
+            for entry in os.scandir(base_dir):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                if entry.name in seen_skills:
+                    continue
+                skill_file = os.path.join(entry.path, "SKILL.md")
+                if os.path.isfile(skill_file):
+                    desc = _extract_skill_desc(skill_file) or entry.name
+                    commands.append((f"/sc/{entry.name}", f"skill {desc}"))
+                    seen_skills.add(entry.name)
+        except OSError:
+            continue
+
+    commands.extend(SUBAGENT_COMMANDS)
+    return commands
+
+
+class CompletionPopup(QFrame):
+    """Floating popup for @ file references and / slash commands."""
+
+    item_selected = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(
+            parent,
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool,
+        )
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFixedWidth(450)
+        self.setMaximumHeight(400)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+
+        self._list = QListWidget()
+        self._list.setFocusPolicy(Qt.NoFocus)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list.itemClicked.connect(self._on_click)
+        self._list.itemDoubleClicked.connect(self._on_click)
+        layout.addWidget(self._list)
+
+        self._all_items: list[tuple[str, str]] = []
+
+        self.setStyleSheet(
+            "CompletionPopup { background: #2d2d2d; border: 1px solid #555; border-radius: 4px; }"
+            "QListWidget { background: transparent; border: none; color: #e0e0e0; font-size: 13px; }"
+            "QListWidget::item { padding: 4px 8px; }"
+            "QListWidget::item:selected { background: #2a82da; color: white; }"
+            "QListWidget::item:hover:!selected { background: #3a3a3a; }"
+        )
+
+    def set_items(self, items: list[tuple[str, str]]):
+        self._all_items = items
+        self.filter_items("")
+
+    def filter_items(self, prefix: str) -> bool:
+        self._list.clear()
+        p = prefix.lower()
+        count = 0
+        for display, insert in self._all_items:
+            dl, il = display.lower(), insert.lower()
+            if p in dl or p in il:
+                item = QListWidgetItem(display)
+                item.setData(Qt.UserRole, insert)
+                self._list.addItem(item)
+                count += 1
+                if count >= 25:
+                    break
+        if count > 0:
+            self._list.setCurrentRow(0)
+        row_h = self._list.sizeHintForRow(0) if count > 0 else 24
+        self.setFixedHeight(min(count * row_h + 6, 400) if count else 30)
+        return count > 0
+
+    def move_selection(self, delta: int):
+        row = max(0, min(self._list.currentRow() + delta, self._list.count() - 1))
+        self._list.setCurrentRow(row)
+
+    def has_items(self) -> bool:
+        return self._list.count() > 0
+
+    def selected_insert_text(self) -> str | None:
+        item = self._list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_click(self, item: QListWidgetItem):
+        text = item.data(Qt.UserRole)
+        if text:
+            self.item_selected.emit(text)
+
+
 class FeedbackTextEdit(QTextEdit):
     image_pasted = Signal(QImage)
 
+    def __init__(self, parent=None, project_directory: str = ""):
+        super().__init__(parent)
+        self._project_dir = project_directory
+        self._popup = CompletionPopup(parent=self)
+        self._popup.item_selected.connect(self._on_popup_selected)
+        self._mode: str | None = None
+        self._trigger_pos: int = 0
+
+    def _collect_project_files(self) -> list[str]:
+        result: list[str] = []
+        d = self._project_dir
+        if not d or not os.path.isdir(d):
+            return result
+        for root, dirs, files in os.walk(d):
+            dirs[:] = [
+                x for x in dirs
+                if x not in IGNORED_DIRS and not x.endswith(".egg-info")
+            ]
+            for f in files:
+                result.append(os.path.relpath(os.path.join(root, f), d))
+                if len(result) >= 2000:
+                    break
+            if len(result) >= 2000:
+                break
+        return result
+
+    def _start_completion(self, mode: str):
+        self._mode = mode
+        self._trigger_pos = self.textCursor().position() - 1
+
+        if mode == "@":
+            items = [(f, f) for f in self._collect_project_files()]
+        else:
+            items = [(f"{cmd}  {desc}", cmd) for cmd, desc in scan_slash_commands()]
+
+        self._popup.set_items(items)
+        if self._popup.has_items():
+            self._show_popup()
+        else:
+            self._mode = None
+
+    def _show_popup(self):
+        rect = self.cursorRect()
+        pos = self.mapToGlobal(rect.bottomLeft())
+        self._popup.move(pos.x(), pos.y() + 2)
+        self._popup.show()
+
+    def _cancel_completion(self):
+        self._mode = None
+        self._popup.hide()
+
+    def _accept_completion(self, text: str | None = None):
+        if text is None:
+            text = self._popup.selected_insert_text()
+        if not text:
+            self._cancel_completion()
+            return
+        cursor = self.textCursor()
+        cursor.setPosition(self._trigger_pos)
+        cursor.setPosition(self.textCursor().position(), QTextCursor.KeepAnchor)
+        prefix = "@" if self._mode == "@" else ""
+        cursor.insertText(f"{prefix}{text} ")
+        self.setTextCursor(cursor)
+        self._cancel_completion()
+
+    def _on_popup_selected(self, text: str):
+        self._accept_completion(text)
+        self.setFocus()
+
+    def _update_filter(self):
+        pos = self.textCursor().position()
+        if pos <= self._trigger_pos:
+            self._cancel_completion()
+            return
+        prefix = self.toPlainText()[self._trigger_pos + 1 : pos]
+        if not self._popup.filter_items(prefix):
+            self._cancel_completion()
+
+    def _is_trigger_context(self) -> bool:
+        """Check if current cursor position is valid for triggering completion."""
+        pos = self.textCursor().position()
+        if pos <= 1:
+            return True
+        ch = self.toPlainText()[pos - 2]
+        return ch in (" ", "\n", "\t", "\r")
+
+    def _handle_completion_key(self, event: QKeyEvent) -> bool:
+        """Handle keys when completion popup is visible. Returns True if consumed."""
+        if not (self._mode and self._popup.isVisible()):
+            return False
+        key = event.key()
+        if key == Qt.Key_Escape:
+            self._cancel_completion()
+            return True
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if event.modifiers() == Qt.ControlModifier:
+                self._cancel_completion()
+                return False
+            self._accept_completion()
+            return True
+        if key == Qt.Key_Tab:
+            self._accept_completion()
+            return True
+        if key == Qt.Key_Up:
+            self._popup.move_selection(-1)
+            return True
+        if key == Qt.Key_Down:
+            self._popup.move_selection(1)
+            return True
+        if key == Qt.Key_Backspace:
+            super().keyPressEvent(event)
+            if self.textCursor().position() <= self._trigger_pos:
+                self._cancel_completion()
+            else:
+                self._update_filter()
+            return True
+        if key == Qt.Key_Space:
+            self._cancel_completion()
+            super().keyPressEvent(event)
+            return True
+        return False
+
     def keyPressEvent(self, event: QKeyEvent):
+        if self._handle_completion_key(event):
+            return
+
         if event.key() == Qt.Key_Return and event.modifiers() == Qt.ControlModifier:
             parent = self.parent()
             while parent and not isinstance(parent, FeedbackUI):
                 parent = parent.parent()
             if parent:
                 parent._submit_feedback()
-        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+            return
+
+        if event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
             clipboard = QApplication.clipboard()
-            if clipboard.mimeData() and clipboard.mimeData().hasImage():
+            mime = clipboard.mimeData()
+            if mime and mime.hasImage():
                 image = clipboard.image()
                 if not image.isNull():
                     self.image_pasted.emit(image)
                     return
             super().keyPressEvent(event)
-        else:
-            super().keyPressEvent(event)
+            return
+
+        super().keyPressEvent(event)
+
+        ch = event.text()
+        if self._mode:
+            self._update_filter()
+        elif ch == "@" and self._is_trigger_context():
+            self._start_completion("@")
+        elif ch == "/" and self._is_trigger_context():
+            self._start_completion("/")
 
 
 class LogSignals(QObject):
@@ -432,13 +717,15 @@ class FeedbackUI(QMainWindow):
             separator.setFrameShadow(QFrame.Sunken)
             feedback_layout.addWidget(separator)
 
-        self.feedback_text = FeedbackTextEdit()
+        self.feedback_text = FeedbackTextEdit(
+            project_directory=self.project_directory
+        )
         self.feedback_text.image_pasted.connect(self._on_image_pasted)
         m = self.feedback_text.contentsMargins()
         padding = m.top() + m.bottom() + 5
         self.feedback_text.setMinimumHeight(5 * self.feedback_text.fontMetrics().height() + padding)
         self.feedback_text.setPlaceholderText(
-            "Enter your feedback here (Ctrl+Enter to submit, Ctrl+V to paste screenshot)"
+            "Enter feedback (Ctrl+Enter to submit, @ for files, / for commands)"
         )
         feedback_layout.addWidget(self.feedback_text)
 

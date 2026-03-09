@@ -82,7 +82,7 @@ afterMCPExecution
 
 ---
 
-## Three Core Features
+## Four Core Features
 
 ### 1. ⚡ One-Click Agent Interrupt
 
@@ -111,6 +111,21 @@ Thumbnail preview, individual delete, auto-compress > 1600px.
 ### 3. 💬 Feedback Loop
 
 Ask questions. Get clarifications. Make decisions. Repeat — all in one request.
+
+### 4. 🔍 Smart Completion — `@` Files & `/` Commands
+
+Type `@` or `/` in the feedback box — instant autocomplete, just like Cursor's native chat.
+
+| Trigger | What it does | Source |
+|---------|-------------|--------|
+| `@` | File reference — fuzzy search your project files | Real-time scan of project directory |
+| `/sc/` | Skill commands — auto-discovered from `~/.cursor/skills*/` and `~/.claude/skills/` | Dynamic scan on every trigger |
+| `/agent/` | Subagent types — `explore`, `shell`, `browser-use`, `code-simplifier` | Built-in |
+| `/edit` `/chat` `/plan` | Mode switches | Built-in |
+
+**Keyboard:** `↑↓` navigate, `Tab`/`Enter` accept, `Escape` cancel. Filters as you type.
+
+No cache. New files and skills appear instantly — zero restart needed.
 
 ---
 
@@ -219,6 +234,8 @@ Cannot stop. But new creation can be blocked.
 | Screenshot | ✅ | ❌ | ✅ |
 | Heartbeat | ✅ | ❌ | ✅ |
 | **One-click interrupt** | ✅ | ❌ | ❌ |
+| **`@` file completion** | ✅ | ❌ | ❌ |
+| **`/` command completion** | ✅ | ❌ | ❌ |
 | **System tray** | ✅ | ❌ | ❌ |
 | **Hooks integration** | ✅ | ❌ | ❌ |
 | **One-click install** | ✅ | ❌ | ❌ |

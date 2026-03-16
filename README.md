@@ -82,7 +82,7 @@ afterMCPExecution
 
 ---
 
-## Four Core Features
+## Core Features
 
 ### 1. ⚡ One-Click Agent Interrupt
 
@@ -96,7 +96,7 @@ Click tray icon → Agent's next tool call blocked by Hook
 
 **All within the same request turn. Zero extra cost.**
 
-### 2. 📸 Screenshot Feedback
+### 2. 📸 Screenshot Feedback + Click-to-Zoom
 
 Stop describing bugs in words — show the AI:
 
@@ -106,7 +106,7 @@ Stop describing bugs in words — show the AI:
 | 📋 Paste | `Ctrl+V` / `Cmd+V` | Works with system screenshot tools |
 | 📁 Browse | Click Browse... | Select local images |
 
-Thumbnail preview, individual delete, auto-compress > 1600px.
+Thumbnail preview with **click-to-enlarge** (full-screen modal overlay), hover-to-delete, auto-compress > 1600px.
 
 ### 3. 💬 Feedback Loop
 
@@ -126,6 +126,36 @@ Type `@` or `/` in the feedback box — instant autocomplete, just like Cursor's
 **Keyboard:** `↑↓` navigate, `Tab`/`Enter` accept, `Escape` cancel. Filters as you type.
 
 No cache. New files and skills appear instantly — zero restart needed.
+
+### 5. 🪟 Single-Window Multi-Tab (Daemon Mode)
+
+On Unix/macOS, all feedback sessions run in a **single daemon window** with tabs:
+
+- Same agent reuses its tab via `tab_id` deduplication — no window proliferation
+- Daemon auto-starts when MCP is called, stays alive in background
+- **System tray icon** integrated — interrupt, settings, and window management in one process
+- `KeepAlive: true` LaunchAgent ensures auto-restart on crash
+
+### 6. ⚙️ Settings & Bottom Bar Toggles
+
+- **Gear button** opens a centralized settings dialog: language defaults, auto-reply, timeout, custom suffix text, quick replies management, version check
+- **"使用中文"** toggle — appends Chinese-response instruction to feedback
+- **"重新读取Rules"** toggle — reminds AI to re-read project rules
+- Both toggles configurable as default-on/off in settings
+
+### 7. ⏱ Auto-Reply Countdown
+
+For non-critical feedback prompts, configure a countdown timer (in settings):
+
+- Orange countdown label: `02:30 (click to cancel)`
+- Any user interaction (typing, clicking) cancels the countdown
+- On expiration: auto-submits `"[自动回复] 用户暂未响应，请继续或稍后重试。"`
+
+### 8. 🔄 Version Update Check
+
+- On daemon startup, fetches remote `VERSION` from GitHub
+- Tray notification if a newer version is available
+- Manual check button in settings dialog
 
 ---
 
@@ -160,26 +190,37 @@ No cache. New files and skills appear instantly — zero restart needed.
 
 | Feature | Description |
 |---------|-------------|
-| **Heartbeat Detection** | Detects Cursor disconnection (~90s). Auto-terminates orphan windows. |
+| **Adaptive Heartbeat** | Progressive intervals: 10s (0-10min) → 60s (10min-1h) → 300s (1h+). Prevents message flooding during long tasks. |
+| **12-Hour Soft Timeout** | `SOFT_TIMEOUT = 43000s`. Returns heartbeat message instead of failing — supports very long tasks. |
 | **Automatic Retry** | First attempt failed? Retries once. Falls back to AskQuestion if both fail. |
-| **UI Timeout** | 30-minute inactivity timeout. Resets on keyboard/mouse activity. |
-| **Multi-Agent** | Parallel agents get independent windows (#1, #2, #3...). No file lock conflicts. |
+| **Daemon Watchdog** | Periodic check that poll timer is alive. Auto-restart if stuck. |
+| **Multi-Tab Deduplication** | Same `tab_id` reuses existing tab instead of creating new ones. |
+| **KeepAlive** | macOS LaunchAgent with `KeepAlive: true` — daemon auto-restarts on crash. |
 
 ---
 
 ## 🔧 Configuration
 
-For long-running tasks, increase MCP timeout in Cursor config:
+MCP timeout is pre-configured to 43200s (12 hours) by the installer. You can adjust it in the **Settings dialog** (gear button or tray right-click → Settings), which auto-syncs to `~/.cursor/mcp.json`:
 
 ```json
 {
   "interactive-feedback": {
     "command": "uv",
-    "timeout": 3600,
+    "timeout": 43200,
     "args": [...]
   }
 }
 ```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| 使用中文 | On | Append Chinese response instruction |
+| 重读 Rules | Off | Remind AI to re-read project rules |
+| Timeout (min) | 720 | Soft timeout, synced to mcp.json |
+| Auto-reply (sec) | 0 (off) | Countdown for auto-reply |
+| Custom suffix | empty | Custom text appended to every submission |
+| Check updates | On | Version check on daemon startup |
 
 ---
 
@@ -231,16 +272,20 @@ Cannot stop. But new creation can be blocked.
 | Feature | This project | [Original](https://github.com/noopstudios/interactive-feedback-mcp) | [Capture](https://github.com/dragonstylecc/Interactive-Feedback-With-Capture-MCP) |
 |---------|:---:|:---:|:---:|
 | Text feedback | ✅ | ✅ | ✅ |
-| Screenshot | ✅ | ❌ | ✅ |
-| Heartbeat | ✅ | ❌ | ✅ |
+| Screenshot + zoom | ✅ | ❌ | ✅ |
+| Adaptive heartbeat | ✅ | ❌ | ✅ |
 | **One-click interrupt** | ✅ | ❌ | ❌ |
 | **`@` file completion** | ✅ | ❌ | ❌ |
 | **`/` command completion** | ✅ | ❌ | ❌ |
-| **System tray** | ✅ | ❌ | ❌ |
+| **Single-window multi-tab** | ✅ | ❌ | ❌ |
+| **Settings dialog** | ✅ | ❌ | ❌ |
+| **Chinese/Rules toggles** | ✅ | ❌ | ❌ |
+| **Auto-reply countdown** | ✅ | ❌ | ❌ |
+| **Version update check** | ✅ | ❌ | ❌ |
+| **System tray (daemon)** | ✅ | ❌ | ❌ |
 | **Hooks integration** | ✅ | ❌ | ❌ |
-| **One-click install** | ✅ | ❌ | ❌ |
 | **Subagent block** | ✅ | ❌ | ❌ |
-| **Cross-platform hooks** | ✅ | — | — |
+| **12-hour soft timeout** | ✅ | ❌ | ❌ |
 | Predefined options | ✅ | ❌ | ✅ |
 | Command execution | ✅ | ✅ | ❌ |
 
@@ -250,16 +295,18 @@ Cannot stop. But new creation can be blocked.
 
 ```
 cursor-snap-mcp/
-├── server.py              ← MCP server
-├── feedback_ui.py         ← PySide6 feedback UI
-├── tray_app.py            ← System tray trigger (cross-platform)
+├── server.py              ← MCP server (daemon mode + adaptive heartbeat)
+├── feedback_ui.py         ← PySide6 feedback UI (widgets, zoom, toggles, countdown)
+├── feedback_daemon.py     ← Multi-tab daemon + system tray + interrupt + settings
+├── settings_dialog.py     ← Settings dialog + config helpers + version check
+├── tray_app.py            ← Standalone tray (deprecated, Windows fallback)
+├── VERSION                ← Version file for update checks
 ├── hooks/                 ← Cursor Hooks
 │   ├── interrupt-check.sh / .ps1
 │   ├── interrupt-check-subagent.sh / .ps1
 │   └── clear-interrupt.sh / .ps1
 ├── docs/install-guide     ← Agent-readable install instructions
 ├── install.sh / install.ps1
-├── start-tray.sh
 └── pyproject.toml
 ```
 

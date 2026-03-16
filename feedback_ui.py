@@ -34,6 +34,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -177,17 +178,60 @@ def get_user_environment() -> dict[str, str]:
         CloseHandle(token)
 
 
+class ImageZoomDialog(QDialog):
+    """Full-screen overlay to display an enlarged screenshot."""
+
+    def __init__(self, pixmap: QPixmap, parent=None):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setModal(True)
+        self.setStyleSheet("background: rgba(0, 0, 0, 200);")
+        self.setCursor(Qt.PointingHandCursor)
+
+        screen_geo = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen_geo)
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+
+        margin = 80
+        max_w = screen_geo.width() - margin * 2
+        max_h = screen_geo.height() - margin * 2
+        scaled = pixmap.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        img_label = QLabel()
+        img_label.setPixmap(scaled)
+        img_label.setAlignment(Qt.AlignCenter)
+        img_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(img_label)
+
+        hint = QLabel("点击任意位置关闭")
+        hint.setStyleSheet("color: rgba(255,255,255,160); font-size: 13px;")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(hint)
+
+    def mousePressEvent(self, event):
+        self.accept()
+
+    def keyPressEvent(self, event):
+        self.accept()
+
+
 class ScreenshotThumbnail(QWidget):
     removed = Signal(int)
 
     def __init__(self, pixmap: QPixmap, index: int, parent=None):
         super().__init__(parent)
         self.index = index
+        self.full_pixmap = pixmap
+        self.setCursor(Qt.PointingHandCursor)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
 
         thumb_label = QLabel()
+        thumb_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         scaled = pixmap.scaled(150, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         thumb_label.setPixmap(scaled)
         thumb_label.setAlignment(Qt.AlignCenter)
@@ -196,16 +240,32 @@ class ScreenshotThumbnail(QWidget):
         )
         layout.addWidget(thumb_label)
 
-        remove_btn = QPushButton("✕")
-        remove_btn.setFixedHeight(22)
-        remove_btn.setStyleSheet(
+        self._remove_btn = QPushButton("✕")
+        self._remove_btn.setFixedHeight(22)
+        self._remove_btn.setStyleSheet(
             "QPushButton { color: #ff6666; background: transparent; "
             "border: 1px solid #555; border-radius: 3px; font-size: 11px; }"
             "QPushButton:hover { background: rgba(255,102,102,0.25); }"
         )
-        remove_btn.clicked.connect(lambda: self.removed.emit(self.index))
-        layout.addWidget(remove_btn)
+        self._remove_btn.clicked.connect(lambda: self.removed.emit(self.index))
+        self._remove_btn.setVisible(False)
+        layout.addWidget(self._remove_btn)
         self.setFixedWidth(166)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            dlg = ImageZoomDialog(self.full_pixmap, parent=self.window())
+            dlg.exec()
+            return
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        self._remove_btn.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._remove_btn.setVisible(False)
+        super().leaveEvent(event)
 
 
 IGNORED_DIRS = {
@@ -485,7 +545,7 @@ class FeedbackTextEdit(QTextEdit):
 
         if event.key() == Qt.Key_Return and event.modifiers() == Qt.ControlModifier:
             parent = self.parent()
-            while parent and not isinstance(parent, FeedbackUI):
+            while parent and not isinstance(parent, FeedbackContentWidget):
                 parent = parent.parent()
             if parent:
                 parent._submit_feedback()
@@ -517,7 +577,381 @@ class LogSignals(QObject):
     append_log = Signal(str)
 
 
+class FeedbackContentWidget(QWidget):
+    """Reusable feedback content: message display, options, text input, screenshots, submit.
+
+    Can be embedded in a standalone window (FeedbackUI) or a daemon tab (DaemonWindow).
+    """
+
+    feedback_submitted = Signal(dict)
+
+    def __init__(
+        self,
+        message: str,
+        predefined_options: list[str] | None = None,
+        project_directory: str = "",
+        countdown_seconds: int = 0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.message = message
+        self.predefined_options = predefined_options or []
+        self.project_directory = project_directory
+        self.screenshots: list[QPixmap] = []
+        self.option_checkboxes: list[QCheckBox] = []
+        self._countdown_remaining = countdown_seconds
+        self._countdown_timer: QTimer | None = None
+        self._create_ui()
+        if countdown_seconds > 0:
+            self._start_countdown()
+
+    def _create_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        prompt_header = QHBoxLayout()
+        prompt_title = QLabel("Message:")
+        prompt_title.setStyleSheet("font-weight: bold; color: #ccc; font-size: 12px;")
+        prompt_header.addWidget(prompt_title)
+        prompt_header.addStretch()
+        copy_btn = QPushButton("Copy")
+        copy_btn.setFixedHeight(24)
+        copy_btn.setStyleSheet(
+            "QPushButton { color: #aaa; background: transparent; "
+            "border: 1px solid #555; border-radius: 3px; font-size: 11px; padding: 0 8px; }"
+            "QPushButton:hover { background: rgba(42,130,218,0.25); color: #fff; }"
+        )
+        copy_btn.setToolTip("Copy message to clipboard")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.message))
+        prompt_header.addWidget(copy_btn)
+        layout.addLayout(prompt_header)
+
+        self.description_text = QTextEdit()
+        self.description_text.setPlainText(self.message)
+        self.description_text.setReadOnly(True)
+        self.description_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.description_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.description_text.setStyleSheet(
+            "QTextEdit { background: #2a2a2a; border: 1px solid #555; "
+            "border-radius: 4px; padding: 8px; color: #e0e0e0; font-size: 13px; }"
+        )
+        self.description_text.document().setDocumentMargin(4)
+        font_h = self.description_text.fontMetrics().height()
+        self.description_text.setMinimumHeight(3 * font_h + 20)
+        self.description_text.setMaximumHeight(8 * font_h + 20)
+        self.description_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.description_text)
+
+        if self.predefined_options:
+            options_frame = QFrame()
+            options_layout = QVBoxLayout(options_frame)
+            options_layout.setContentsMargins(0, 10, 0, 10)
+            for option in self.predefined_options:
+                checkbox = QCheckBox(option)
+                self.option_checkboxes.append(checkbox)
+                options_layout.addWidget(checkbox)
+            layout.addWidget(options_frame)
+
+            separator = QFrame()
+            separator.setFrameShape(QFrame.HLine)
+            separator.setFrameShadow(QFrame.Sunken)
+            layout.addWidget(separator)
+
+        self.feedback_text = FeedbackTextEdit(
+            project_directory=self.project_directory
+        )
+        self.feedback_text.image_pasted.connect(self._on_image_pasted)
+        m = self.feedback_text.contentsMargins()
+        padding = m.top() + m.bottom() + 5
+        self.feedback_text.setMinimumHeight(5 * self.feedback_text.fontMetrics().height() + padding)
+        self.feedback_text.setPlaceholderText(
+            "Enter feedback (Ctrl+Enter to submit, @ for files, / for commands)"
+        )
+        layout.addWidget(self.feedback_text)
+
+        screenshot_section = QFrame()
+        screenshot_main_layout = QVBoxLayout(screenshot_section)
+        screenshot_main_layout.setContentsMargins(0, 5, 0, 5)
+
+        btn_layout = QHBoxLayout()
+        capture_btn = QPushButton("Capture Screen")
+        capture_btn.setToolTip("Minimize this window and capture the full screen")
+        capture_btn.clicked.connect(self._capture_screen)
+        paste_btn = QPushButton("Paste Clipboard")
+        paste_btn.setToolTip("Paste an image from clipboard (you can also Ctrl+V)")
+        paste_btn.clicked.connect(self._paste_from_clipboard)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.setToolTip("Browse for image files")
+        browse_btn.clicked.connect(self._browse_image)
+        btn_layout.addWidget(capture_btn)
+        btn_layout.addWidget(paste_btn)
+        btn_layout.addWidget(browse_btn)
+        btn_layout.addStretch()
+        screenshot_main_layout.addLayout(btn_layout)
+
+        self.screenshot_count_label = QLabel("")
+        self.screenshot_count_label.setStyleSheet("color: #aaa; font-size: 12px;")
+        self.screenshot_count_label.setVisible(False)
+        screenshot_main_layout.addWidget(self.screenshot_count_label)
+
+        self.screenshots_scroll = QScrollArea()
+        self.screenshots_scroll.setWidgetResizable(True)
+        self.screenshots_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.screenshots_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.screenshots_scroll.setFixedHeight(140)
+        self.screenshots_scroll.setVisible(False)
+        self.screenshots_scroll.setStyleSheet(
+            "QScrollArea { border: 1px solid #555; border-radius: 4px; }"
+        )
+        self.thumbnails_container = QWidget()
+        self.thumbnails_layout = QHBoxLayout(self.thumbnails_container)
+        self.thumbnails_layout.setAlignment(Qt.AlignLeft)
+        self.thumbnails_layout.setContentsMargins(4, 4, 4, 4)
+        self.screenshots_scroll.setWidget(self.thumbnails_container)
+        screenshot_main_layout.addWidget(self.screenshots_scroll)
+
+        layout.addWidget(screenshot_section)
+
+        # ── Countdown label (hidden by default) ──
+        self._countdown_label = QLabel()
+        self._countdown_label.setAlignment(Qt.AlignCenter)
+        self._countdown_label.setStyleSheet(
+            "background: #e8a030; color: #222; font-weight: bold; "
+            "border-radius: 4px; padding: 6px; font-size: 13px;"
+        )
+        self._countdown_label.setCursor(Qt.PointingHandCursor)
+        self._countdown_label.setVisible(False)
+        self._countdown_label.mousePressEvent = lambda _: self._cancel_countdown()
+        layout.addWidget(self._countdown_label)
+
+        # ── Bottom bar: gear + toggles + submit ──
+        from settings_dialog import load_settings, SettingsDialog
+
+        cfg = load_settings()
+
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setSpacing(8)
+
+        gear_btn = QPushButton("\u2699")
+        gear_btn.setFixedSize(28, 28)
+        gear_btn.setToolTip("设置")
+        gear_btn.setStyleSheet(
+            "QPushButton { font-size: 16px; background: transparent; border: none; color: #aaa; }"
+            "QPushButton:hover { color: #fff; }"
+        )
+        gear_btn.clicked.connect(self._open_settings)
+        bottom_bar.addWidget(gear_btn)
+
+        shortcut_hint = QLabel("Ctrl+Enter 提交")
+        shortcut_hint.setStyleSheet("color: #666; font-size: 11px;")
+        bottom_bar.addWidget(shortcut_hint)
+
+        bottom_bar.addStretch()
+
+        self._rules_cb = QCheckBox("重新读取Rules")
+        self._rules_cb.setChecked(cfg.get("reread_rules_default", False))
+        self._rules_cb.setStyleSheet("color: #ccc; font-size: 12px;")
+        bottom_bar.addWidget(self._rules_cb)
+
+        self._chinese_cb = QCheckBox("使用中文")
+        self._chinese_cb.setChecked(cfg.get("chinese_mode_default", True))
+        self._chinese_cb.setStyleSheet("color: #ccc; font-size: 12px;")
+        bottom_bar.addWidget(self._chinese_cb)
+
+        submit_button = QPushButton("提交反馈")
+        submit_button.setStyleSheet(
+            "QPushButton { background: #2a82da; color: white; border: none; "
+            "border-radius: 4px; padding: 6px 18px; font-weight: bold; }"
+            "QPushButton:hover { background: #3a92ea; }"
+        )
+        submit_button.clicked.connect(self._submit_feedback)
+        bottom_bar.addWidget(submit_button)
+
+        layout.addLayout(bottom_bar)
+
+    def _capture_screen(self):
+        window = self.window()
+        if window:
+            window.showMinimized()
+        QTimer.singleShot(600, self._do_capture_screen)
+
+    def _do_capture_screen(self):
+        screen = QApplication.primaryScreen()
+        if screen:
+            pixmap = screen.grabWindow(0)
+            if not pixmap.isNull():
+                self._add_screenshot(pixmap)
+        window = self.window()
+        if window:
+            window.showNormal()
+            window.activateWindow()
+            window.raise_()
+
+    def _paste_from_clipboard(self):
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData()
+        if mime and mime.hasImage():
+            image = clipboard.image()
+            if not image.isNull():
+                self._add_screenshot(QPixmap.fromImage(image))
+
+    def _on_image_pasted(self, image: QImage):
+        pixmap = QPixmap.fromImage(image)
+        if not pixmap.isNull():
+            self._add_screenshot(pixmap)
+
+    def _browse_image(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Images", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*)",
+        )
+        for path in file_paths:
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                self._add_screenshot(pixmap)
+
+    def _add_screenshot(self, pixmap: QPixmap):
+        max_size = 1600
+        if pixmap.width() > max_size or pixmap.height() > max_size:
+            pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.screenshots.append(pixmap)
+        self._update_thumbnails()
+
+    def _remove_screenshot(self, index: int):
+        if 0 <= index < len(self.screenshots):
+            self.screenshots.pop(index)
+            self._update_thumbnails()
+
+    def _update_thumbnails(self):
+        while self.thumbnails_layout.count():
+            item = self.thumbnails_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        for i, pixmap in enumerate(self.screenshots):
+            thumb = ScreenshotThumbnail(pixmap, i)
+            thumb.removed.connect(self._remove_screenshot)
+            self.thumbnails_layout.addWidget(thumb)
+        has_screenshots = len(self.screenshots) > 0
+        self.screenshots_scroll.setVisible(has_screenshots)
+        self.screenshot_count_label.setVisible(has_screenshots)
+        if has_screenshots:
+            self.screenshot_count_label.setText(
+                f"{len(self.screenshots)} screenshot(s) attached"
+            )
+
+    # ── Countdown ──
+
+    def _start_countdown(self):
+        self._update_countdown_label()
+        self._countdown_label.setVisible(True)
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.timeout.connect(self._countdown_tick)
+        self._countdown_timer.start(1000)
+
+    def _countdown_tick(self):
+        self._countdown_remaining -= 1
+        if self._countdown_remaining <= 0:
+            self._cancel_countdown()
+            result = FeedbackResult(
+                logs="",
+                interactive_feedback="[自动回复] 用户暂未响应，请继续或稍后重试。",
+                images=[],
+            )
+            self.feedback_submitted.emit(result)
+            return
+        self._update_countdown_label()
+
+    def _update_countdown_label(self):
+        m, s = divmod(self._countdown_remaining, 60)
+        self._countdown_label.setText(
+            f"自动回复倒计时: {m:02d}:{s:02d}  (点击取消)"
+        )
+
+    def _cancel_countdown(self):
+        if self._countdown_timer:
+            self._countdown_timer.stop()
+            self._countdown_timer = None
+        self._countdown_label.setVisible(False)
+
+    def _reset_countdown_on_interaction(self):
+        """Cancel countdown on any user interaction."""
+        if self._countdown_timer and self._countdown_timer.isActive():
+            self._cancel_countdown()
+
+    def event(self, ev):
+        if ev.type() in (
+            QEvent.KeyPress, QEvent.MouseButtonPress,
+            QEvent.MouseMove, QEvent.Wheel,
+        ):
+            self._reset_countdown_on_interaction()
+        return super().event(ev)
+
+    # ── Settings ──
+
+    def _open_settings(self):
+        from settings_dialog import SettingsDialog, load_settings
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            cfg = load_settings()
+            self._chinese_cb.setChecked(cfg.get("chinese_mode_default", True))
+            self._rules_cb.setChecked(cfg.get("reread_rules_default", False))
+
+    # ── Submission ──
+
+    @staticmethod
+    def _pixmap_to_base64(pixmap: QPixmap) -> str:
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        buffer.open(QIODevice.WriteOnly)
+        pixmap.save(buffer, "PNG")
+        buffer.close()
+        return byte_array.toBase64().data().decode("ascii")
+
+    def _submit_feedback(self):
+        self._cancel_countdown()
+
+        feedback_text = self.feedback_text.toPlainText().strip()
+        selected_options = []
+        if self.option_checkboxes:
+            for i, checkbox in enumerate(self.option_checkboxes):
+                if checkbox.isChecked():
+                    selected_options.append(self.predefined_options[i])
+
+        final_parts = []
+        if selected_options:
+            final_parts.append("; ".join(selected_options))
+        if feedback_text:
+            final_parts.append(feedback_text)
+
+        suffix_parts = []
+        if self._chinese_cb.isChecked():
+            suffix_parts.append("必须完全使用中文（简体）回复和思考")
+        if self._rules_cb.isChecked():
+            suffix_parts.append("重新读取Rules")
+        from settings_dialog import load_settings
+        custom = load_settings().get("custom_suffix_text", "")
+        if custom:
+            suffix_parts.append(custom)
+
+        if suffix_parts:
+            final_parts.append("\n---\n" + "\n".join(suffix_parts))
+
+        final_feedback = "\n\n".join(final_parts)
+
+        images_b64 = [self._pixmap_to_base64(p) for p in self.screenshots]
+
+        result = FeedbackResult(
+            logs="",
+            interactive_feedback=final_feedback,
+            images=images_b64,
+        )
+        self.feedback_submitted.emit(result)
+
+
 class FeedbackUI(QMainWindow):
+    """Standalone feedback window with command section + FeedbackContentWidget."""
+
     def __init__(
         self,
         project_directory: str,
@@ -530,13 +964,12 @@ class FeedbackUI(QMainWindow):
         self.prompt = prompt
         self.predefined_options = predefined_options or []
         self.window_id = window_id
-        
+
         self.timeout_ms = 30 * 60 * 1000
 
         self.process: subprocess.Popen | None = None
-        self.log_buffer = []
-        self.feedback_result = None
-        self.screenshots: list[QPixmap] = []
+        self.log_buffer: list[str] = []
+        self.feedback_result: FeedbackResult | None = None
         self.log_signals = LogSignals()
         self.log_signals.append_log.connect(self._append_log)
 
@@ -668,115 +1101,20 @@ class FeedbackUI(QMainWindow):
         self.feedback_group = QGroupBox("Feedback")
         feedback_layout = QVBoxLayout(self.feedback_group)
 
-        prompt_header = QHBoxLayout()
-        prompt_title = QLabel("Message:")
-        prompt_title.setStyleSheet("font-weight: bold; color: #ccc; font-size: 12px;")
-        prompt_header.addWidget(prompt_title)
-        prompt_header.addStretch()
-        copy_btn = QPushButton("Copy")
-        copy_btn.setFixedHeight(24)
-        copy_btn.setStyleSheet(
-            "QPushButton { color: #aaa; background: transparent; "
-            "border: 1px solid #555; border-radius: 3px; font-size: 11px; padding: 0 8px; }"
-            "QPushButton:hover { background: rgba(42,130,218,0.25); color: #fff; }"
+        self.content_widget = FeedbackContentWidget(
+            message=self.prompt,
+            predefined_options=self.predefined_options,
+            project_directory=self.project_directory,
         )
-        copy_btn.setToolTip("Copy message to clipboard")
-        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.prompt))
-        prompt_header.addWidget(copy_btn)
-        feedback_layout.addLayout(prompt_header)
-
-        self.description_text = QTextEdit()
-        self.description_text.setPlainText(self.prompt)
-        self.description_text.setReadOnly(True)
-        self.description_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.description_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.description_text.setStyleSheet(
-            "QTextEdit { background: #2a2a2a; border: 1px solid #555; "
-            "border-radius: 4px; padding: 8px; color: #e0e0e0; font-size: 13px; }"
-        )
-        self.description_text.document().setDocumentMargin(4)
-        font_h = self.description_text.fontMetrics().height()
-        self.description_text.setMinimumHeight(3 * font_h + 20)
-        self.description_text.setMaximumHeight(8 * font_h + 20)
-        self.description_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        feedback_layout.addWidget(self.description_text)
-
-        self.option_checkboxes = []
-        if self.predefined_options:
-            options_frame = QFrame()
-            options_layout = QVBoxLayout(options_frame)
-            options_layout.setContentsMargins(0, 10, 0, 10)
-            for option in self.predefined_options:
-                checkbox = QCheckBox(option)
-                self.option_checkboxes.append(checkbox)
-                options_layout.addWidget(checkbox)
-            feedback_layout.addWidget(options_frame)
-
-            separator = QFrame()
-            separator.setFrameShape(QFrame.HLine)
-            separator.setFrameShadow(QFrame.Sunken)
-            feedback_layout.addWidget(separator)
-
-        self.feedback_text = FeedbackTextEdit(
-            project_directory=self.project_directory
-        )
-        self.feedback_text.image_pasted.connect(self._on_image_pasted)
-        m = self.feedback_text.contentsMargins()
-        padding = m.top() + m.bottom() + 5
-        self.feedback_text.setMinimumHeight(5 * self.feedback_text.fontMetrics().height() + padding)
-        self.feedback_text.setPlaceholderText(
-            "Enter feedback (Ctrl+Enter to submit, @ for files, / for commands)"
-        )
-        feedback_layout.addWidget(self.feedback_text)
-
-        screenshot_section = QFrame()
-        screenshot_main_layout = QVBoxLayout(screenshot_section)
-        screenshot_main_layout.setContentsMargins(0, 5, 0, 5)
-
-        btn_layout = QHBoxLayout()
-        capture_btn = QPushButton("Capture Screen")
-        capture_btn.setToolTip("Minimize this window and capture the full screen")
-        capture_btn.clicked.connect(self._capture_screen)
-        paste_btn = QPushButton("Paste Clipboard")
-        paste_btn.setToolTip("Paste an image from clipboard (you can also Ctrl+V)")
-        paste_btn.clicked.connect(self._paste_from_clipboard)
-        browse_btn = QPushButton("Browse...")
-        browse_btn.setToolTip("Browse for image files")
-        browse_btn.clicked.connect(self._browse_image)
-        btn_layout.addWidget(capture_btn)
-        btn_layout.addWidget(paste_btn)
-        btn_layout.addWidget(browse_btn)
-        btn_layout.addStretch()
-        screenshot_main_layout.addLayout(btn_layout)
-
-        self.screenshot_count_label = QLabel("")
-        self.screenshot_count_label.setStyleSheet("color: #aaa; font-size: 12px;")
-        self.screenshot_count_label.setVisible(False)
-        screenshot_main_layout.addWidget(self.screenshot_count_label)
-
-        self.screenshots_scroll = QScrollArea()
-        self.screenshots_scroll.setWidgetResizable(True)
-        self.screenshots_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.screenshots_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.screenshots_scroll.setFixedHeight(140)
-        self.screenshots_scroll.setVisible(False)
-        self.screenshots_scroll.setStyleSheet(
-            "QScrollArea { border: 1px solid #555; border-radius: 4px; }"
-        )
-        self.thumbnails_container = QWidget()
-        self.thumbnails_layout = QHBoxLayout(self.thumbnails_container)
-        self.thumbnails_layout.setAlignment(Qt.AlignLeft)
-        self.thumbnails_layout.setContentsMargins(4, 4, 4, 4)
-        self.screenshots_scroll.setWidget(self.thumbnails_container)
-        screenshot_main_layout.addWidget(self.screenshots_scroll)
-
-        feedback_layout.addWidget(screenshot_section)
-
-        submit_button = QPushButton("&Send Feedback (Ctrl+Enter)")
-        submit_button.clicked.connect(self._submit_feedback)
-        feedback_layout.addWidget(submit_button)
+        self.content_widget.feedback_submitted.connect(self._on_content_submitted)
+        feedback_layout.addWidget(self.content_widget)
 
         layout.addWidget(self.feedback_group)
+
+    def _on_content_submitted(self, result: dict):
+        result["logs"] = "".join(self.log_buffer)
+        self.feedback_result = result
+        self.close()
 
     def _toggle_command_section(self):
         is_visible = self.command_group.isVisible()
@@ -806,7 +1144,7 @@ class FeedbackUI(QMainWindow):
             self.run_button.setText("&Run")
             self.process = None
             self.activateWindow()
-            self.feedback_text.setFocus()
+            self.content_widget.feedback_text.setFocus()
 
     def _run_command(self):
         if self.process:
@@ -856,106 +1194,6 @@ class FeedbackUI(QMainWindow):
         self.settings.setValue("execute_automatically", self.config["execute_automatically"])
         self.settings.endGroup()
         self._append_log("Configuration saved for this project.\n")
-
-    def _capture_screen(self):
-        self.showMinimized()
-        QTimer.singleShot(600, self._do_capture_screen)
-
-    def _do_capture_screen(self):
-        screen = QApplication.primaryScreen()
-        if screen:
-            pixmap = screen.grabWindow(0)
-            if not pixmap.isNull():
-                self._add_screenshot(pixmap)
-        self.showNormal()
-        self.activateWindow()
-        self.raise_()
-
-    def _paste_from_clipboard(self):
-        clipboard = QApplication.clipboard()
-        mime = clipboard.mimeData()
-        if mime and mime.hasImage():
-            image = clipboard.image()
-            if not image.isNull():
-                self._add_screenshot(QPixmap.fromImage(image))
-
-    def _on_image_pasted(self, image: QImage):
-        pixmap = QPixmap.fromImage(image)
-        if not pixmap.isNull():
-            self._add_screenshot(pixmap)
-
-    def _browse_image(self):
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images", "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*)",
-        )
-        for path in file_paths:
-            pixmap = QPixmap(path)
-            if not pixmap.isNull():
-                self._add_screenshot(pixmap)
-
-    def _add_screenshot(self, pixmap: QPixmap):
-        max_size = 1600
-        if pixmap.width() > max_size or pixmap.height() > max_size:
-            pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.screenshots.append(pixmap)
-        self._update_thumbnails()
-
-    def _remove_screenshot(self, index: int):
-        if 0 <= index < len(self.screenshots):
-            self.screenshots.pop(index)
-            self._update_thumbnails()
-
-    def _update_thumbnails(self):
-        while self.thumbnails_layout.count():
-            item = self.thumbnails_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        for i, pixmap in enumerate(self.screenshots):
-            thumb = ScreenshotThumbnail(pixmap, i)
-            thumb.removed.connect(self._remove_screenshot)
-            self.thumbnails_layout.addWidget(thumb)
-        has_screenshots = len(self.screenshots) > 0
-        self.screenshots_scroll.setVisible(has_screenshots)
-        self.screenshot_count_label.setVisible(has_screenshots)
-        if has_screenshots:
-            self.screenshot_count_label.setText(
-                f"{len(self.screenshots)} screenshot(s) attached"
-            )
-
-    @staticmethod
-    def _pixmap_to_base64(pixmap: QPixmap) -> str:
-        byte_array = QByteArray()
-        buffer = QBuffer(byte_array)
-        buffer.open(QIODevice.WriteOnly)
-        pixmap.save(buffer, "PNG")
-        buffer.close()
-        return byte_array.toBase64().data().decode("ascii")
-
-    def _submit_feedback(self):
-        feedback_text = self.feedback_text.toPlainText().strip()
-        selected_options = []
-        if self.option_checkboxes:
-            for i, checkbox in enumerate(self.option_checkboxes):
-                if checkbox.isChecked():
-                    selected_options.append(self.predefined_options[i])
-
-        final_parts = []
-        if selected_options:
-            final_parts.append("; ".join(selected_options))
-        if feedback_text:
-            final_parts.append(feedback_text)
-        final_feedback = "\n\n".join(final_parts)
-
-        images_b64 = [self._pixmap_to_base64(p) for p in self.screenshots]
-
-        self.feedback_result = FeedbackResult(
-            logs="".join(self.log_buffer),
-            interactive_feedback=final_feedback,
-            images=images_b64,
-        )
-        self.close()
 
     def clear_logs(self):
         self.log_buffer = []

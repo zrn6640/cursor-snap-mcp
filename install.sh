@@ -95,7 +95,7 @@ else
     "interactive-feedback": {
       "command": "uv",
       "args": ["--directory", "$SCRIPT_DIR", "run", "server.py"],
-      "timeout": 10800,
+      "timeout": 43200,
       "autoApprove": ["interactive_feedback"]
     }
   }
@@ -104,45 +104,55 @@ MCPEOF
     echo "  MCP config created"
 fi
 
-# 6. Setup tray app (macOS only)
-echo "[5/5] Setting up tray app (macOS only)..."
+# 6. Setup feedback daemon (macOS only — includes tray icon)
+echo "[5/5] Setting up feedback daemon (macOS only)..."
 if [ "$(uname)" = "Darwin" ]; then
-    PLIST_PATH="$HOME/Library/LaunchAgents/com.cursor.interrupt-tray.plist"
+    # Unload old tray-only agent if present
+    OLD_PLIST="$HOME/Library/LaunchAgents/com.cursor.interrupt-tray.plist"
+    if [ -f "$OLD_PLIST" ]; then
+        launchctl unload "$OLD_PLIST" 2>/dev/null || true
+        rm -f "$OLD_PLIST"
+        echo "  Removed legacy tray-only LaunchAgent"
+    fi
+
+    PLIST_PATH="$HOME/Library/LaunchAgents/com.cursor.feedback-daemon.plist"
     cat > "$PLIST_PATH" << PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.cursor.interrupt-tray</string>
+	<string>com.cursor.feedback-daemon</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>$SCRIPT_DIR/.venv/bin/python</string>
-		<string>$SCRIPT_DIR/tray_app.py</string>
+		<string>$SCRIPT_DIR/feedback_daemon.py</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>$SCRIPT_DIR</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<false/>
+	<true/>
 	<key>StandardOutPath</key>
-	<string>/tmp/cursor-interrupt-tray.log</string>
+	<string>/tmp/mcp_feedback_daemon.log</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/cursor-interrupt-tray.log</string>
+	<string>/tmp/mcp_feedback_daemon.log</string>
 </dict>
 </plist>
 PLISTEOF
-    echo "  macOS LaunchAgent created (auto-start on login)"
-    
-    # Start tray app now
+    echo "  macOS LaunchAgent created (auto-start + KeepAlive)"
+
+    # Stop old processes and start daemon now
     pkill -f "tray_app.py" 2>/dev/null || true
+    pkill -f "feedback_daemon.py" 2>/dev/null || true
     sleep 1
-    "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/tray_app.py" &
+    rm -f /tmp/mcp_feedback_daemon.sock /tmp/mcp_feedback_daemon.lock
+    "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/feedback_daemon.py" &
     disown
-    echo "  Tray app started (menu bar icon)"
+    echo "  Feedback daemon started (tray icon + multi-tab feedback)"
 else
-    echo "  Non-macOS: Tray app needs manual start: python tray_app.py"
+    echo "  Non-macOS: Start daemon manually: python feedback_daemon.py"
 fi
 
 echo ""
@@ -150,6 +160,7 @@ echo "=== Installation complete! ==="
 echo ""
 echo "Next steps:"
 echo "  1. Restart Cursor to load hooks"
-echo "  2. Look for the gray circle in your menu bar"
+echo "  2. Look for the gray circle in your menu bar (feedback daemon)"
 echo "  3. Click it to interrupt the agent anytime"
+echo "  4. Right-click for settings and more options"
 echo ""

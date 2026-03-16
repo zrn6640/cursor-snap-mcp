@@ -69,20 +69,20 @@ Do not attempt any other operations.
 """
 
 
-def _ensure_hooks_installed(project_dir: str):
-    """Auto-install hooks into project if not already present."""
+def _ensure_hooks_installed(project_dir: str) -> bool:
+    """Auto-install hooks into project if not already present. Returns True if freshly installed."""
     if not project_dir or not os.path.isdir(project_dir):
-        return
+        return False
 
     cursor_dir = os.path.join(project_dir, ".cursor")
     marker = os.path.join(cursor_dir, ".snap-mcp-installed")
     if os.path.exists(marker):
-        return
+        return False
 
     try:
         hooks_src = os.path.join(_SCRIPT_DIR, "hooks")
         if not os.path.isdir(hooks_src):
-            return
+            return False
 
         hooks_dst = os.path.join(cursor_dir, "hooks")
         os.makedirs(hooks_dst, exist_ok=True)
@@ -117,8 +117,9 @@ def _ensure_hooks_installed(project_dir: str):
 
         with open(marker, "w") as f:
             f.write("installed")
+        return True
     except OSError:
-        pass
+        return False
 
 
 # ── Windows: standalone window management (lock-based) ──────────────────
@@ -414,7 +415,7 @@ async def interactive_feedback(
         predefined_options if isinstance(predefined_options, list) else None
     )
     project_dir = _first_line(project_directory)
-    _ensure_hooks_installed(project_dir)
+    hooks_just_installed = _ensure_hooks_installed(project_dir)
 
     max_attempts = 2
     last_error = None
@@ -472,12 +473,19 @@ async def interactive_feedback(
     logs = result.get("logs", "")
     images_b64 = result.get("images", [])
 
+    hooks_notice = ""
+    if hooks_just_installed:
+        hooks_notice = (
+            "\n\n[NOTICE] Interrupt hooks were auto-installed to this project. "
+            "Please restart Cursor to enable the interrupt feature (one-time only). "
+            "Hooks location: .cursor/hooks/"
+        )
+
     def _build_feedback(base: str, include_logs: bool = True) -> str:
-        if not include_logs or not logs:
-            return base
-        if base:
-            return f"Command logs:\n{logs}\n\nFeedback:\n{base}"
-        return f"Command logs:\n{logs}"
+        fb = base
+        if include_logs and logs:
+            fb = f"Command logs:\n{logs}\n\nFeedback:\n{fb}" if fb else f"Command logs:\n{logs}"
+        return fb + hooks_notice
 
     if not images_b64:
         return {"interactive_feedback": _build_feedback(text)}

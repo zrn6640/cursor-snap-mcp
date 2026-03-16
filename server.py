@@ -476,9 +476,8 @@ async def interactive_feedback(
     hooks_notice = ""
     if hooks_just_installed:
         hooks_notice = (
-            "\n\n[NOTICE] Interrupt hooks were auto-installed to this project. "
-            "Please restart Cursor to enable the interrupt feature (one-time only). "
-            "Hooks location: .cursor/hooks/"
+            "\n\n[提示] 中断钩子已自动安装到本项目 (.cursor/hooks/)。"
+            "请重启 Cursor 以启用一键中断功能（仅需一次）。"
         )
 
     def _build_feedback(base: str, include_logs: bool = True) -> str:

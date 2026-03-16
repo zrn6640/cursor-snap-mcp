@@ -1,8 +1,12 @@
-# Cursor subagentStart hook: block new subagent creation when interrupt is active (Windows).
-# Must output JSON to stdout; exit 0 for both allow and deny (decision is in JSON).
+# Cursor subagentStart hook: block new subagent creation on interrupt (per-project, Windows).
 $null = $input | Out-Null
 
-$signalFile = Join-Path $env:TEMP "cursor_interrupt"
+$projectHash = ([System.Security.Cryptography.MD5]::Create().ComputeHash(
+    [System.Text.Encoding]::UTF8.GetBytes($PWD.Path)
+) | ForEach-Object { $_.ToString("x2") }) -join "" | Select-Object -First 1
+$projectHash = $projectHash.Substring(0, 8)
+
+$signalFile = Join-Path $env:TEMP "cursor_interrupt_$projectHash"
 
 if (Test-Path $signalFile) {
     Write-Output '{"decision":"deny","reason":"[SYSTEM_INTERRUPT] User interrupt active. Do not create subagents. Call interactive_feedback MCP tool immediately."}'

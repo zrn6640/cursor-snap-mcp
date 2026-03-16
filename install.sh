@@ -34,6 +34,7 @@ cp "$SCRIPT_DIR/hooks/interrupt-check.sh" "$PROJECT_DIR/.cursor/hooks/"
 cp "$SCRIPT_DIR/hooks/interrupt-check-subagent.sh" "$PROJECT_DIR/.cursor/hooks/"
 cp "$SCRIPT_DIR/hooks/clear-interrupt.sh" "$PROJECT_DIR/.cursor/hooks/"
 chmod +x "$PROJECT_DIR/.cursor/hooks/"*.sh
+touch "$PROJECT_DIR/.cursor/.snap-mcp-installed"
 echo "  Hooks installed to $PROJECT_DIR/.cursor/hooks/"
 
 # 3. Create hooks.json (merge if exists)

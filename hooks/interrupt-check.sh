@@ -1,10 +1,19 @@
 #!/bin/bash
-# Cursor preToolUse hook: detect user interrupt signal.
+# Cursor preToolUse hook: detect user interrupt signal (per-project).
 # Exit code 2 = block the tool. Writes reason to stderr for agent visibility.
 cat > /dev/null
 
-SIGNAL_FILE="/tmp/cursor_interrupt"
-ACTIVE_FILE="/tmp/cursor_interrupt_active"
+# Compute per-project hash from cwd
+if command -v md5 &>/dev/null; then
+    PROJECT_HASH=$(echo -n "$(pwd)" | md5 -q | cut -c1-8)
+elif command -v md5sum &>/dev/null; then
+    PROJECT_HASH=$(echo -n "$(pwd)" | md5sum | cut -c1-8)
+else
+    PROJECT_HASH="global"
+fi
+
+SIGNAL_FILE="/tmp/cursor_interrupt_${PROJECT_HASH}"
+ACTIVE_FILE="/tmp/cursor_interrupt_active_${PROJECT_HASH}"
 
 if [ -f "$SIGNAL_FILE" ]; then
     touch "$ACTIVE_FILE"

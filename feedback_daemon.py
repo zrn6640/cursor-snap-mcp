@@ -7,6 +7,7 @@ All feedback sessions are displayed as tabs in a single window.
 """
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import queue
@@ -45,7 +46,14 @@ LOCK_PATH = os.path.join("/tmp", "mcp_feedback_daemon.lock")
 LOG_PATH = os.path.join("/tmp", "mcp_feedback_daemon.log")
 
 TEMP_DIR = os.environ.get("TEMP", tempfile.gettempdir()) if sys.platform == "win32" else "/tmp"
-SIGNAL_FILE = os.path.join(TEMP_DIR, "cursor_interrupt")
+
+
+def _project_hash(project_dir: str) -> str:
+    return hashlib.md5(project_dir.encode("utf-8")).hexdigest()[:8]
+
+
+def _signal_file_for(project_dir: str) -> str:
+    return os.path.join(TEMP_DIR, f"cursor_interrupt_{_project_hash(project_dir)}")
 
 
 def create_circle_icon(color: str, size: int = 64) -> QIcon:
@@ -219,68 +227,112 @@ class DaemonWindow(QMainWindow):
     def _setup_tray(self):
         self._icon_idle = create_circle_icon("#888888")
         self._icon_active = create_circle_icon("#FF3333")
-        self._is_interrupt_active = False
+        self._active_signals: set[str] = set()
 
         self._tray = QSystemTrayIcon(self)
         self._tray.setIcon(self._icon_idle)
         self._tray.setToolTip("MCP Feedback Daemon")
 
-        menu = QMenu()
+        self._tray_menu = QMenu()
+        self._interrupt_submenu = QMenu("\u26a1 Send Interrupt", self._tray_menu)
+        self._tray_menu.addMenu(self._interrupt_submenu)
+        self._tray_menu.addSeparator()
 
-        interrupt_action = QAction("\u26a1 Send Interrupt", menu)
-        interrupt_action.triggered.connect(self._send_interrupt)
-        menu.addAction(interrupt_action)
-
-        menu.addSeparator()
-
-        show_action = QAction("显示窗口", menu)
+        show_action = QAction("显示窗口", self._tray_menu)
         show_action.triggered.connect(self._show_window)
-        menu.addAction(show_action)
+        self._tray_menu.addAction(show_action)
 
-        settings_action = QAction("设置", menu)
+        settings_action = QAction("设置", self._tray_menu)
         settings_action.triggered.connect(self._open_settings)
-        menu.addAction(settings_action)
+        self._tray_menu.addAction(settings_action)
 
-        menu.addSeparator()
+        self._tray_menu.addSeparator()
 
-        quit_action = QAction("退出", menu)
+        quit_action = QAction("退出", self._tray_menu)
         quit_action.triggered.connect(QApplication.instance().quit)
-        menu.addAction(quit_action)
+        self._tray_menu.addAction(quit_action)
 
-        self._tray.setContextMenu(menu)
+        self._tray.setContextMenu(self._tray_menu)
         self._tray.activated.connect(self._on_tray_activated)
+        self._tray_menu.aboutToShow.connect(self._rebuild_interrupt_menu)
         self._tray.show()
 
         self._signal_timer = QTimer(self)
-        self._signal_timer.timeout.connect(self._poll_signal_file)
+        self._signal_timer.timeout.connect(self._poll_signal_files)
         self._signal_timer.start(500)
+
+    def _get_active_projects(self) -> dict[str, str]:
+        """Return {project_dir: tab_title} for all active tabs."""
+        projects: dict[str, str] = {}
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, FeedbackContentWidget):
+                pdir = tab.project_directory
+                if pdir and pdir not in projects:
+                    projects[pdir] = self.tabs.tabText(i)
+        return projects
+
+    def _rebuild_interrupt_menu(self):
+        self._interrupt_submenu.clear()
+        projects = self._get_active_projects()
+
+        if not projects:
+            no_proj = QAction("(无活跃项目)", self._interrupt_submenu)
+            no_proj.setEnabled(False)
+            self._interrupt_submenu.addAction(no_proj)
+            return
+
+        for pdir, title in projects.items():
+            basename = os.path.basename(os.path.normpath(pdir))
+            action = QAction(f"\u26a1 {basename} ({title})", self._interrupt_submenu)
+            action.triggered.connect(lambda checked=False, d=pdir: self._send_interrupt_for(d))
+            self._interrupt_submenu.addAction(action)
+
+        if len(projects) > 1:
+            self._interrupt_submenu.addSeparator()
+            all_action = QAction("\u26a1 中断所有项目", self._interrupt_submenu)
+            all_action.triggered.connect(self._send_interrupt_all)
+            self._interrupt_submenu.addAction(all_action)
 
     def _on_tray_activated(self, reason):
         if sys.platform == "darwin":
             return
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
-            self._send_interrupt()
+            current_tab = self.tabs.currentWidget()
+            if isinstance(current_tab, FeedbackContentWidget) and current_tab.project_directory:
+                self._send_interrupt_for(current_tab.project_directory)
 
-    def _send_interrupt(self):
+    def _send_interrupt_for(self, project_dir: str):
+        sig_path = _signal_file_for(project_dir)
         try:
-            with open(SIGNAL_FILE, "w", encoding="utf-8") as f:
+            with open(sig_path, "w", encoding="utf-8") as f:
                 f.write("")
-            self._is_interrupt_active = True
+            self._active_signals.add(sig_path)
             self._tray.setIcon(self._icon_active)
-            self._tray.setToolTip("MCP Feedback - Waiting for agent...")
+            basename = os.path.basename(os.path.normpath(project_dir))
+            self._tray.setToolTip(f"MCP Feedback - Interrupt: {basename}")
             self._tray.showMessage(
                 "Cursor Interrupt",
-                "Signal sent. Waiting for agent...",
+                f"Signal sent for {basename}. Waiting for agent...",
                 QSystemTrayIcon.Information,
                 2000,
             )
-            _log("Interrupt signal sent")
+            _log(f"Interrupt signal sent for {project_dir} → {sig_path}")
         except OSError as e:
             _log(f"Interrupt error: {e}")
 
-    def _poll_signal_file(self):
-        if self._is_interrupt_active and not os.path.exists(SIGNAL_FILE):
-            self._is_interrupt_active = False
+    def _send_interrupt_all(self):
+        for pdir in self._get_active_projects():
+            self._send_interrupt_for(pdir)
+
+    def _poll_signal_files(self):
+        if not self._active_signals:
+            return
+        cleared = {p for p in self._active_signals if not os.path.exists(p)}
+        if cleared:
+            self._active_signals -= cleared
+            _log(f"Signal cleared: {cleared}")
+        if not self._active_signals:
             self._tray.setIcon(self._icon_idle)
             self._tray.setToolTip("MCP Feedback Daemon")
 

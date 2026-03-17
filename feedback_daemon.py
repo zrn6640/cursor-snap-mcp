@@ -87,17 +87,28 @@ request_queue: queue.Queue = queue.Queue()
 close_queue: queue.Queue = queue.Queue()
 response_dict: Dict[str, dict] = {}
 response_events: Dict[str, threading.Event] = {}
+disconnected_sessions: Dict[str, float] = {}
+
+RECV_TIMEOUT = 10.0
+ORPHAN_TAB_TIMEOUT = 300.0
 
 
 def _recv_json(conn: socket.socket) -> dict:
+    conn.settimeout(RECV_TIMEOUT)
     data = b""
-    while True:
-        chunk = conn.recv(4096)
-        if not chunk:
-            raise ConnectionError("Client disconnected")
-        data += chunk
-        if b"\n" in data:
-            break
+    max_size = 16 * 1024 * 1024
+    try:
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                raise ConnectionError("Client disconnected")
+            data += chunk
+            if len(data) > max_size:
+                raise ConnectionError("Request too large")
+            if b"\n" in data:
+                break
+    finally:
+        conn.settimeout(None)
     return json.loads(data.decode("utf-8").strip())
 
 
@@ -109,6 +120,11 @@ def _handle_client(conn: socket.socket):
     session_id = None
     try:
         request = _recv_json(conn)
+
+        if request.get("type") == "ping":
+            _send_json(conn, {"type": "pong"})
+            return
+
         session_id = request.get("session_id", "unknown")
 
         event = threading.Event()
@@ -121,18 +137,18 @@ def _handle_client(conn: socket.socket):
                 try:
                     peek = conn.recv(1, socket.MSG_PEEK)
                     if not peek:
-                        _log(f"Client disconnected for session {session_id}")
+                        _log(f"Client disconnected for session {session_id}, tab kept open")
                         response_events.pop(session_id, None)
-                        close_queue.put(session_id)
+                        disconnected_sessions[session_id] = datetime.datetime.now().timestamp()
                         return
                 except BlockingIOError:
                     pass
                 finally:
                     conn.setblocking(True)
             except (socket.error, OSError):
-                _log(f"Socket error for session {session_id}")
+                _log(f"Socket error for session {session_id}, tab kept open")
                 response_events.pop(session_id, None)
-                close_queue.put(session_id)
+                disconnected_sessions[session_id] = datetime.datetime.now().timestamp()
                 return
 
         response = response_dict.pop(session_id, {"interactive_feedback": "", "images": []})
@@ -145,12 +161,12 @@ def _handle_client(conn: socket.socket):
         _log(f"Client connection error for {session_id}: {e}")
         if session_id:
             response_events.pop(session_id, None)
-            close_queue.put(session_id)
+            disconnected_sessions[session_id] = datetime.datetime.now().timestamp()
     except Exception as e:
         _log(f"Unexpected error handling client {session_id}: {type(e).__name__}: {e}")
         if session_id:
             response_events.pop(session_id, None)
-            close_queue.put(session_id)
+            disconnected_sessions[session_id] = datetime.datetime.now().timestamp()
     finally:
         try:
             conn.close()
@@ -179,12 +195,30 @@ def _socket_server():
             break
 
 
+def _macos_activate_app():
+    """Use macOS native API to bring our app to the front."""
+    try:
+        from AppKit import NSApplication, NSApplicationActivateIgnoringOtherApps
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except ImportError:
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["osascript", "-e", 'tell application "System Events" to set frontmost of '
+                 'first process whose unix id is ' + str(os.getpid()) + ' to true'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+
+
 class DaemonWindow(QMainWindow):
     """Single-window multi-tab feedback UI."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MCP Feedback")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(script_dir, "images", "feedback.png")
@@ -217,6 +251,10 @@ class DaemonWindow(QMainWindow):
         self._watchdog_timer = QTimer(self)
         self._watchdog_timer.timeout.connect(self._watchdog_check)
         self._watchdog_timer.start(60000)
+
+        self._orphan_timer = QTimer(self)
+        self._orphan_timer.timeout.connect(self._cleanup_orphan_tabs)
+        self._orphan_timer.start(10000)
 
         cfg = load_settings()
         if cfg.get("check_update_on_start", True):
@@ -341,6 +379,8 @@ class DaemonWindow(QMainWindow):
         self.showNormal()
         self.activateWindow()
         self.raise_()
+        if sys.platform == "darwin":
+            _macos_activate_app()
 
     def _open_settings(self):
         dlg = SettingsDialog(self)
@@ -400,6 +440,8 @@ class DaemonWindow(QMainWindow):
             if old_sid:
                 self._session_tabs.pop(old_sid, None)
                 response_events.pop(old_sid, None)
+                disconnected_sessions.pop(old_sid, None)
+                response_dict.pop(old_sid, None)
             self.tabs.removeTab(idx)
             tab.deleteLater()
             _log(f"Replaced tab for tab_id={tab_id} (old session {old_sid})")
@@ -441,11 +483,12 @@ class DaemonWindow(QMainWindow):
             self.tabs.setCurrentIndex(index)
             self._session_tabs[session_id] = tab
 
-            if not had_existing:
-                self.setVisible(True)
-                self.showNormal()
-                self.activateWindow()
-                self.raise_()
+            self.setVisible(True)
+            self.showNormal()
+            self.activateWindow()
+            self.raise_()
+            if sys.platform == "darwin":
+                _macos_activate_app()
 
             _log(
                 f"Added tab for session {session_id}, "
@@ -480,7 +523,8 @@ class DaemonWindow(QMainWindow):
         try:
             img_count = len(result.get("images", []))
             text_len = len(result.get("interactive_feedback", ""))
-            _log(f"Tab submitted for {session_id}: text={text_len}, images={img_count}")
+            was_disconnected = session_id in disconnected_sessions
+            _log(f"Tab submitted for {session_id}: text={text_len}, images={img_count}, disconnected={was_disconnected}")
 
             tab = self._session_tabs.pop(session_id, None)
             if tab:
@@ -489,6 +533,7 @@ class DaemonWindow(QMainWindow):
                     self.tabs.removeTab(index)
                 tab.deleteLater()
 
+            disconnected_sessions.pop(session_id, None)
             response_dict[session_id] = result
             evt = response_events.pop(session_id, None)
             if evt:
@@ -514,6 +559,7 @@ class DaemonWindow(QMainWindow):
                 _log(f"Tab close requested by user: index={index}, session={session_id}")
                 if session_id:
                     self._session_tabs.pop(session_id, None)
+                    disconnected_sessions.pop(session_id, None)
                     response_dict[session_id] = {
                         "interactive_feedback": "",
                         "images": [],
@@ -528,6 +574,36 @@ class DaemonWindow(QMainWindow):
                 self.hide()
         except Exception as e:
             _log(f"ERROR in _on_tab_close_requested index={index}: {e}")
+
+    def _cleanup_orphan_tabs(self):
+        """Clean up tabs whose client disconnected more than ORPHAN_TAB_TIMEOUT seconds ago."""
+        now = datetime.datetime.now().timestamp()
+        expired = [
+            sid for sid, ts in disconnected_sessions.items()
+            if (now - ts) >= ORPHAN_TAB_TIMEOUT
+        ]
+        for sid in expired:
+            disconnected_sessions.pop(sid, None)
+            tab = self._session_tabs.pop(sid, None)
+            if tab:
+                index = self.tabs.indexOf(tab)
+                if index >= 0:
+                    self.tabs.removeTab(index)
+                tab.deleteLater()
+                _log(f"Cleaned up orphan tab for session {sid} (timeout)")
+            response_dict.pop(sid, None)
+
+        if expired and self.tabs.count() == 0:
+            self.hide()
+
+        for sid in list(disconnected_sessions.keys()):
+            if sid in self._session_tabs:
+                tab = self._session_tabs[sid]
+                index = self.tabs.indexOf(tab)
+                if index >= 0:
+                    title = self.tabs.tabText(index)
+                    if not title.startswith("⚠ "):
+                        self.tabs.setTabText(index, f"⚠ {title}")
 
     def _watchdog_check(self):
         if hasattr(self, "_prev_watchdog_count") and self._poll_count == self._prev_watchdog_count:

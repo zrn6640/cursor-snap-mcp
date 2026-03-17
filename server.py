@@ -164,15 +164,22 @@ def _release_window_id(fd):
 # ── Unix: daemon-based single window (socket IPC) ───────────────────────
 
 
+LOCK_PATH = os.path.join("/tmp", "mcp_feedback_daemon.lock")
+
+
 def _daemon_is_alive() -> bool:
     if sys.platform == "win32":
         return False
+    if not os.path.exists(SOCKET_PATH):
+        return False
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(1.0)
+        sock.settimeout(2.0)
         sock.connect(SOCKET_PATH)
+        sock.sendall(b'{"type":"ping"}\n')
+        data = sock.recv(1024)
         sock.close()
-        return True
+        return b"pong" in data
     except (socket.error, FileNotFoundError, OSError):
         return False
 
